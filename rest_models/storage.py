@@ -10,7 +10,7 @@ import unidecode
 from django.core.files.base import ContentFile
 from django.core.files.storage import Storage
 from django.utils.deconstruct import deconstructible
-from django.utils.http import urlunquote
+from urllib.parse import unquote as urlunquote
 
 from rest_models.backend.connexion import get_basic_session
 
