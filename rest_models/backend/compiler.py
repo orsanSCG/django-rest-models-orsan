@@ -6,16 +6,17 @@ import itertools
 import logging
 import re
 from collections import defaultdict, namedtuple
+from json import JSONDecodeError
 
+import django
 import six
-from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import EmptyResultSet, ImproperlyConfigured
 from django.db.models import FileField, Transform
 from django.db.models.aggregates import Count
 from django.db.models.base import ModelBase
 from django.db.models.expressions import Col, RawSQL
 from django.db.models.fields.related_lookups import RelatedExact, RelatedIn
 from django.db.models.lookups import Exact, In, IsNull, Lookup, Range
-from django.db.models.query import EmptyResultSet
 from django.db.models.sql.compiler import SQLCompiler as BaseSQLCompiler
 from django.db.models.sql.constants import CURSOR, MULTI, NO_RESULTS, ORDER_DIR, SINGLE
 from django.db.models.sql.datastructures import BaseTable
@@ -26,6 +27,7 @@ from rest_models.backend.connexion import build_url
 from rest_models.backend.exceptions import FakeDatabaseDbAPI2
 from rest_models.backend.utils import message_from_response
 from rest_models.router import RestModelRouter
+from rest_models.storage import RestFileField
 from rest_models.utils import pgcd
 
 logger = logging.getLogger(__name__)
@@ -803,6 +805,9 @@ class SQLCompiler(BaseSQLCompiler):
         :param field: the field to parse
         :rtype: tuple[bool, unicode]
         """
+        if field == '?':
+            return False, '?'
+
         if self.query.standard_ordering:
             asc, desc = ORDER_DIR['ASC']
         else:
@@ -990,13 +995,15 @@ class SQLCompiler(BaseSQLCompiler):
 
             pk, params = self.build_params_and_pk()
             url = get_resource_path(self.query.model, pk)
-            response = self.connection.cursor().get(
-                url,
-                params=params
-            )
-            self.raise_on_response(url, params, response)
+            response = self.make_request(params, url)
 
-            json = response.json()
+            try:
+                json = response.json()
+            except JSONDecodeError:
+                extra = {'params': params, 'response': response}
+                logger.error('json decode error while calling {}; retrying'.format(url), extra=extra)
+                json = self.make_request(params, url).json()
+
             meta = self.get_meta(json, response)
             if meta:
                 # pagination and others thing
@@ -1038,6 +1045,14 @@ class SQLCompiler(BaseSQLCompiler):
         result = self.result_iter(response_reader)
         return result
 
+    def make_request(self, params, url):
+        response = self.connection.cursor().get(
+            url,
+            params=params
+        )
+        self.raise_on_response(url, params, response)
+        return response
+
 
 class SQLInsertCompiler(SQLCompiler):
     def resolve_data_n_files(self, obj):
@@ -1058,7 +1073,7 @@ class SQLInsertCompiler(SQLCompiler):
                 file = fieldfile.name
 
                 if file is not None:  # field value can be None....
-                    files[field.column] = (file.name, file, getattr(file, 'content_type', None))
+                    files[field.column] = (file.name, file.content, getattr(file, 'content_type', None))
                 else:
                     data[field.column] = None
             else:
@@ -1206,7 +1221,12 @@ class SQLInsertCompiler(SQLCompiler):
                     setattr(obj, field.attname, python_val)
 
             if return_id and result_json:
-                return result_json[get_resource_name(query.model, many=False)][opts.pk.column]
+                result = result_json[get_resource_name(query.model, many=False)][opts.pk.column]
+                if django.VERSION >= (3, 1):
+                    result = [result_json[get_resource_name(query.model, many=False)][opts.pk.column]]
+                elif django.VERSION < (3, 0):
+                    return result
+                return (result, )
 
 
 class FakeCursor(object):
@@ -1216,6 +1236,12 @@ class FakeCursor(object):
 
     def __init__(self, rowcount):
         self.rowcount = rowcount
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 class SQLDeleteCompiler(SQLCompiler):
@@ -1304,8 +1330,11 @@ class SQLUpdateCompiler(SQLCompiler):
                 if file is None:
                     # field can be set to None
                     data[field.column] = None
+                elif isinstance(file, RestFileField):
+                    content_type = getattr(file.content, 'content_type', None)
+                    files[field.column] = (file.content.name, file.content, content_type)
                 elif isinstance(file, six.string_types):
-                    # str => we don't change it since it's not comming from our custom storage
+                    # str => we don't change it since it's not coming from our custom storage
                     pass
                 else:
                     files[field.column] = (file.name, file, getattr(file, 'content_type', None))
