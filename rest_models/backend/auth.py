@@ -49,6 +49,18 @@ class BasicAuth(ApiAuthBase):
         return self.backend(request)
 
 
+
+
+
+
+class RDFToken(ApiAuthBase):
+
+    def __call__(self, request):
+        self.token = self.settings_dict.get('OPTIONS', {}).get('TOKEN', '')
+        request.headers[str('Authorization')] = str("Token %s" % self.token)
+        return request
+    
+    
 class OAuthToken(ApiAuthBase):
 
     @property
