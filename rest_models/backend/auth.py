@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, print_function, unicode_literals
-
 import datetime
 import logging
 from collections import namedtuple
@@ -49,18 +46,6 @@ class BasicAuth(ApiAuthBase):
         return self.backend(request)
 
 
-
-
-
-
-class RDFToken(ApiAuthBase):
-
-    def __call__(self, request):
-        self.token = self.settings_dict.get('OPTIONS', {}).get('TOKEN', '')
-        request.headers[str('Authorization')] = str("Token %s" % self.token)
-        return request
-    
-    
 class OAuthToken(ApiAuthBase):
 
     @property
@@ -92,15 +77,23 @@ class OAuthToken(ApiAuthBase):
         :return: the token from the api
         :rtype: Token
         """
-        conn = self.databasewrapper.cursor()
-        params = {'grant_type': 'client_credentials'}
+        if self.settings_dict.get('OPTIONS', {}).get('ENFORCE_POST', False):
+            kw = 'data'
+        else:
+            logger.warning("Get oauth token: Using deprecated GET parameter, will be removed in future releases."
+                           "use ENFORCE_POST to fix this (cf. djang-rest-models README)")
+            kw = 'params'
+        _kwargs = {
+            'auth': (self.settings_dict['USER'], self.settings_dict['PASSWORD']),
+            'stream': False,
+            kw: {'grant_type': 'client_credentials'}
+        }
         # Get client credentials params
+        conn = self.databasewrapper.cursor()
         response = conn.session.request(
             'POST',
             self.url_token,
-            params=params,
-            auth=(self.settings_dict['USER'], self.settings_dict['PASSWORD']),
-            stream=False
+            **_kwargs
         )
         if response.status_code != 200:
             raise ProgrammingError("unable to retrive the oauth token from %s: %s" %

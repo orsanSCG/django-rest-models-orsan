@@ -1,25 +1,8 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, print_function, unicode_literals
-
 import json
 from collections import defaultdict
+from pathlib import Path
 
-import six
-
-try:
-    from pathlib import Path
-except ImportError:  # pragma: no cover
-    class Path(object):
-        """
-        fake pathlib.Path for retro-compatiblitiy
-        """
-        def __init__(self, path):
-            if isinstance(path, Path):
-                path = path.path
-            self.path = path
-
-        def open(self, mode):
-            return open(self.path, mode)
+from django.contrib.auth.hashers import BasePasswordHasher
 
 
 def dict_contains(subdict, maindict):
@@ -124,7 +107,7 @@ class JsonFixtures(object):
             else:
                 self.url_for_data[k].insert(0, v)
         for file in args:
-            if isinstance(file, (six.text_type, six.binary_type, Path)):
+            if isinstance(file, (str, bytes, Path)):
                 self.files.append(file)
             elif isinstance(file, dict):
                 self.update(**file)
@@ -152,7 +135,7 @@ class JsonFixtures(object):
             with Path(path).open('r') as f:
                 return json.load(f)
         except ValueError as ve:
-            six.raise_from(ValueError("error while loading the fixture %s" % path), ve)
+            raise ValueError("error while loading the fixture %s" % path) from ve
 
     def _load(self):
         """
@@ -226,3 +209,39 @@ def pgcd(a, b):
     while a % b != 0:
         a, b = b, a % b
     return b
+
+
+class NullPasswordHasher(BasePasswordHasher):
+    """
+    A non hashing password algorithm (only for tests)
+    """
+
+    algorithm = "null"
+
+    def encode(self, password, salt):
+        return "%s$%s$%s" % (self.algorithm, salt, password)
+
+    def decode(self, encoded):
+        algorithm, salt, password = encoded.split("$", 2)
+        assert algorithm == self.algorithm
+        return {
+            "algorithm": algorithm,
+            "password": password,
+            "salt": salt,
+        }
+
+    def verify(self, password, encoded):
+        decoded = self.decode(encoded)
+        encoded_2 = self.encode(password, decoded["salt"])
+        return encoded == encoded_2
+
+    def safe_summary(self, encoded):
+        decoded = self.decode(encoded)
+        return {
+            "algorithm": decoded["algorithm"],
+            "salt": decoded["salt"],
+            "hash": decoded["password"],
+        }
+
+    def harden_runtime(self, password, encoded):
+        pass

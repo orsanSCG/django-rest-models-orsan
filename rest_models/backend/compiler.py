@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, print_function, unicode_literals
-
 import collections
 import itertools
 import logging
@@ -9,18 +6,17 @@ from collections import defaultdict, namedtuple
 from json import JSONDecodeError
 
 import django
-import six
 from django.core.exceptions import EmptyResultSet, ImproperlyConfigured
 from django.db.models import FileField, Transform
 from django.db.models.aggregates import Count
 from django.db.models.base import ModelBase
-from django.db.models.expressions import Col, RawSQL
+from django.db.models.expressions import Col, ColPairs, RawSQL, Value
 from django.db.models.fields.related_lookups import RelatedExact, RelatedIn
 from django.db.models.lookups import Exact, In, IsNull, Lookup, Range
 from django.db.models.sql.compiler import SQLCompiler as BaseSQLCompiler
-from django.db.models.sql.constants import CURSOR, MULTI, NO_RESULTS, ORDER_DIR, SINGLE
+from django.db.models.sql.constants import CURSOR, MULTI, NO_RESULTS, ORDER_DIR, ROW_COUNT, SINGLE
 from django.db.models.sql.datastructures import BaseTable
-from django.db.models.sql.where import NothingNode, SubqueryConstraint, WhereNode
+from django.db.models.sql.where import NothingNode, WhereNode
 from django.db.utils import NotSupportedError, OperationalError, ProgrammingError
 
 from rest_models.backend.connexion import build_url
@@ -60,8 +56,8 @@ def extract_exact_pk_value(where):
         exact, isnull = where.children
 
         if (
-            isinstance(exact, Exact) and isinstance(isnull, IsNull) and
-            exact.lhs.target == isnull.lhs.target
+                isinstance(exact, Exact) and isinstance(isnull, IsNull) and
+                exact.lhs.target == isnull.lhs.target
         ):
             return exact
     return None
@@ -77,7 +73,7 @@ def get_resource_path(model, pk=None):
     """
     ret = getattr(model.APIMeta, 'resource_path', None) or get_resource_name(model, False)
     if pk is not None:
-        ret += "%s/" % pk
+        ret += "/%s/" % pk
     return ret
 
 
@@ -337,6 +333,11 @@ class QueryParser(object):
         elif isinstance(col, Col):
             current = self.aliases[col.alias]  # type: Alias
             field = col.target.column
+        elif isinstance(col, ColPairs):
+            current = self.aliases[col.alias]
+            if len(col.targets) != 1:
+                raise NotSupportedError("Only ColPairs with one target is supported")
+            field = col.targets[0].column
         elif isinstance(col, Transform):
             # transform should be passed as is to rest-framework
             current, transforms = self.resolve_path(col.lhs)
@@ -379,7 +380,12 @@ class QueryParser(object):
         :return: 2 sets, the first if the alias useds, the 2nd is the set of the full path of the resources, with the
                  attributes
         """
-        resolved = [self.resolve_path(col) for col in cols if not isinstance(col, RawSQL) or col.sql != '1']
+        resolved = [
+            self.resolve_path(col)
+            for col in cols
+            if (not isinstance(col, RawSQL) or col.sql != '1')
+            and (not isinstance(col, Value) or col.value != 1)  # skip special cases with exists()
+        ]
 
         return (
             set(r[0] for r in resolved),  # set of tuple of Alias successives
@@ -646,7 +652,7 @@ class SQLCompiler(BaseSQLCompiler):
 
     META_NAME = 'meta'
 
-    def __init__(self, query, connection, using):
+    def __init__(self, query, connection, using, elide_empty=True):
         """
         :param django.db.models.sql.query.Query query: the query
         :param rest_models.backend.base.DatabaseWrapper connection: the connection
@@ -654,6 +660,7 @@ class SQLCompiler(BaseSQLCompiler):
         """
         self.query = query
         self.connection = connection
+        self.elide_empty = elide_empty
         self.using = using
         self.quote_cache = {'*': '*'}
         # The select, klass_info, and annotations are needed by QuerySet.iterator()
@@ -666,8 +673,8 @@ class SQLCompiler(BaseSQLCompiler):
         self.subquery = False
         self.query_parser = QueryParser(query)
 
-    def setup_query(self):
-        super(SQLCompiler, self).setup_query()
+    def setup_query(self, with_col_aliases=False):
+        super(SQLCompiler, self).setup_query(with_col_aliases)
         self.check_compatibility()
 
     def is_api_model(self):
@@ -709,10 +716,6 @@ class SQLCompiler(BaseSQLCompiler):
                             raise FakeDatabaseDbAPI2.NotSupportedError(
                                 "nested queryset is not supported"
                             )
-                    elif isinstance(child, SubqueryConstraint):
-                        raise FakeDatabaseDbAPI2.NotSupportedError(
-                            "nested queryset is not supported"
-                        )
                     elif isinstance(child, NothingNode):
                         raise EmptyResultSet
                     else:  # pragma: no cover
@@ -948,7 +951,8 @@ class SQLCompiler(BaseSQLCompiler):
         resolved = [
             self.query_parser.resolve_path(col)
             for col, _, _ in self.select
-            if not isinstance(col, RawSQL) or col.sql != '1'  # skip special case with exists()
+            if (not isinstance(col, RawSQL) or col.sql != '1')
+            and (not isinstance(col, Value) or col.value != 1)   # skip special cases with exists()
         ]
         if not resolved:
             # nothing in select. special case in exists()
@@ -1226,7 +1230,7 @@ class SQLInsertCompiler(SQLCompiler):
                     result = [result_json[get_resource_name(query.model, many=False)][opts.pk.column]]
                 elif django.VERSION < (3, 0):
                     return result
-                return (result, )
+                return (result,)
 
 
 class FakeCursor(object):
@@ -1267,6 +1271,8 @@ class SQLDeleteCompiler(SQLCompiler):
             count = self.handle_delete_through()
         if result_type == CURSOR:
             return FakeCursor(count)
+        elif result_type == ROW_COUNT:
+            return count
 
     def handle_delete_through(self):
         """
@@ -1333,7 +1339,7 @@ class SQLUpdateCompiler(SQLCompiler):
                 elif isinstance(file, RestFileField):
                     content_type = getattr(file.content, 'content_type', None)
                     files[field.column] = (file.content.name, file.content, content_type)
-                elif isinstance(file, six.string_types):
+                elif isinstance(file, str):
                     # str => we don't change it since it's not coming from our custom storage
                     pass
                 else:
