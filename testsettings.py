@@ -96,7 +96,7 @@ REST_FRAMEWORK = {
 }
 
 PASSWORD_HASHERS = [
-    'rest_models.utils.NullPasswordHasher',
+    'django.contrib.auth.hashers.UnsaltedMD5PasswordHasher',
 ]
 
 TEMPLATES = [

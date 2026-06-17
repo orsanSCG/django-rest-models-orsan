@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, print_function, unicode_literals
+
 import collections
 import itertools
 import logging
@@ -14,9 +17,9 @@ from django.db.models.expressions import Col, RawSQL, Value
 from django.db.models.fields.related_lookups import RelatedExact, RelatedIn
 from django.db.models.lookups import Exact, In, IsNull, Lookup, Range
 from django.db.models.sql.compiler import SQLCompiler as BaseSQLCompiler
-from django.db.models.sql.constants import CURSOR, MULTI, NO_RESULTS, ORDER_DIR, ROW_COUNT, SINGLE
+from django.db.models.sql.constants import CURSOR, MULTI, NO_RESULTS, ORDER_DIR, SINGLE
 from django.db.models.sql.datastructures import BaseTable
-from django.db.models.sql.where import NothingNode, WhereNode
+from django.db.models.sql.where import NothingNode, SubqueryConstraint, WhereNode
 from django.db.utils import NotSupportedError, OperationalError, ProgrammingError
 
 from rest_models.backend.connexion import build_url
@@ -332,9 +335,6 @@ class QueryParser(object):
                 raise NotSupportedError("Only Col in sql select is supported")
         elif isinstance(col, Col):
             current = self.aliases[col.alias]  # type: Alias
-            field = col.target.column
-        elif isinstance(col, Col):
-            current = self.aliases[col.alias]
             field = col.target.column
         elif isinstance(col, Transform):
             # transform should be passed as is to rest-framework
@@ -671,8 +671,8 @@ class SQLCompiler(BaseSQLCompiler):
         self.subquery = False
         self.query_parser = QueryParser(query)
 
-    def setup_query(self, with_col_aliases=False):
-        super(SQLCompiler, self).setup_query(with_col_aliases)
+    def setup_query(self):
+        super(SQLCompiler, self).setup_query()
         self.check_compatibility()
 
     def is_api_model(self):
@@ -714,6 +714,10 @@ class SQLCompiler(BaseSQLCompiler):
                             raise FakeDatabaseDbAPI2.NotSupportedError(
                                 "nested queryset is not supported"
                             )
+                    elif isinstance(child, SubqueryConstraint):
+                        raise FakeDatabaseDbAPI2.NotSupportedError(
+                            "nested queryset is not supported"
+                        )
                     elif isinstance(child, NothingNode):
                         raise EmptyResultSet
                     else:  # pragma: no cover
@@ -1269,8 +1273,6 @@ class SQLDeleteCompiler(SQLCompiler):
             count = self.handle_delete_through()
         if result_type == CURSOR:
             return FakeCursor(count)
-        elif result_type == ROW_COUNT:
-            return count
 
     def handle_delete_through(self):
         """

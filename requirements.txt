@@ -1,4 +1,4 @@
-Django<6.0
+Django<5.2
 build
 sphinx
 tox
@@ -6,9 +6,9 @@ isort
 flake8
 requests
 djangorestframework<3.16
-dynamic-rest-bse<2.6
+dynamic-rest-bse<2.5
 -r test_requirements.txt
 twine
-psycopg[binary]
+psycopg2-binary
 Pillow<12
 unidecode
